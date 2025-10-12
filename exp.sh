@@ -59,7 +59,7 @@ set -e
 
 # --- 在这里设置公共命令 --- 
 # 将 GPU 设备 ID 和 python 命令设置为一个变量 
-export CUDA_VISIBLE_DEVICES=3,4,5,7 
+export CUDA_VISIBLE_DEVICES=4,5,6,7 
 
 echo "开始执行实验..." 
 total_start_time=$(date +%s) 
@@ -86,7 +86,8 @@ do
     #     gpus=4 \
     #     seed=$seed
 
-    python train.py model.target.model.low_rank_dim=32 output=lowrank_r32_seed${seed} gpus=4 seed=$seed
+    # python train.py model.target.model.low_rank_dim=32 output=lowrank_r32_seed${seed} gpus=4 seed=$seed
+    python train.py model.target.model.use_low_rank=False output=original_demo_seed/seed${seed} gpus=4 seed=$seed
     
     # 记录单次实验结束时间
     exp_end_time=$(date +%s)

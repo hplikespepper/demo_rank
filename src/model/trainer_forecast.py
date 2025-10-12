@@ -54,6 +54,7 @@ class Trainer(pl.LightningModule):
         self.laplace_loss = LaplaceNLLLoss()
         self.val_metrics = metrics.clone(prefix="val_")
         self.val_metrics_new = metrics.clone(prefix="val_new_")
+        self._prev_best_mode_ratio = {}
     
     def get_model(self, model_type):
         model_dict = {
@@ -81,6 +82,92 @@ class Trainer(pl.LightningModule):
             probs.append(prob)
 
         return predictions, probs
+
+    def on_train_epoch_start(self) -> None:
+        if isinstance(self._prev_best_mode_ratio, dict):
+            self._prev_best_mode_ratio.pop("train/", None)
+
+    def on_validation_epoch_start(self) -> None:
+        if isinstance(self._prev_best_mode_ratio, dict):
+            self._prev_best_mode_ratio.pop("val/", None)
+
+    def _log_best_mode_stats(self, aux_info, prefix="train/"):
+        if not aux_info:
+            return
+
+        best_mode = aux_info.get("best_mode")
+        if best_mode is None or best_mode.numel() == 0:
+            return
+
+        best_mode_cpu = best_mode.detach().to("cpu")
+        pi = aux_info.get("pi")
+
+        if pi is not None:
+            num_modes = int(pi.shape[1])
+        else:
+            num_modes = int(best_mode_cpu.max().item() + 1)
+
+        hist = torch.bincount(best_mode_cpu, minlength=num_modes).to(torch.float32)
+        batch_size = best_mode_cpu.numel()
+        if batch_size == 0:
+            return
+        curr_ratio = hist / float(batch_size)
+
+        prev_ratio = self._prev_best_mode_ratio.get(prefix) if isinstance(self._prev_best_mode_ratio, dict) else None
+        if prev_ratio is not None and prev_ratio.numel() == curr_ratio.numel():
+            diff = torch.abs(curr_ratio - prev_ratio)
+            switch_score = 0.5 * diff.sum()
+        else:
+            switch_score = curr_ratio.new_tensor(0.0)
+
+        device = getattr(self, "device", curr_ratio.device)
+        self.log(
+            f"{prefix}best_mode_switch",
+            switch_score.to(device),
+            on_step=True,
+            on_epoch=True,
+            prog_bar=False,
+            sync_dist=True,
+        )
+
+        ratio_logs = {
+            f"{prefix}best_mode_ratio_{i}": curr_ratio[i].to(device)
+            for i in range(num_modes)
+        }
+        self.log_dict(
+            ratio_logs,
+            on_step=True,
+            on_epoch=True,
+            prog_bar=False,
+            sync_dist=True,
+        )
+
+        unique_modes = (hist > 0).float().sum()
+        self.log(
+            f"{prefix}best_mode_unique",
+            unique_modes.to(device),
+            on_step=True,
+            on_epoch=True,
+            prog_bar=False,
+            sync_dist=True,
+        )
+
+        if pi is not None and pi.numel() > 0:
+            probs = torch.softmax(pi.detach(), dim=-1)
+            entropy = -(probs * probs.clamp_min(1e-8).log()).sum(dim=-1).mean()
+            self.log(
+                f"{prefix}pi_entropy",
+                entropy.to(device),
+                on_step=True,
+                on_epoch=True,
+                prog_bar=False,
+                sync_dist=True,
+            )
+
+        if isinstance(self._prev_best_mode_ratio, dict):
+            self._prev_best_mode_ratio[prefix] = curr_ratio.detach()
+        else:
+            self._prev_best_mode_ratio = {prefix: curr_ratio.detach()}
 
     def cal_loss(self, out, data, tag=''):
         y_hat, pi, y_hat_others = out["y_hat"], out["pi"], out["y_hat_others"]
@@ -156,13 +243,20 @@ class Trainer(pl.LightningModule):
         if dense_predict is not None:
             disp_dict[f"{tag}reg_loss_dense"] = dense_reg_loss.item()
 
-        return loss, disp_dict
+        aux_info = {
+            "best_mode": best_mode.detach(),
+            "pi": pi.detach() if pi is not None else None,
+        }
+
+        return loss, disp_dict, aux_info
 
     def training_step(self, data, batch_idx):
         if isinstance(data, list):
             data = data[-1]
         out = self(data)
-        loss, loss_dict = self.cal_loss(out, data)
+        loss, loss_dict, aux_info = self.cal_loss(out, data)
+
+        self._log_best_mode_stats(aux_info, prefix="train/")
 
         for k, v in loss_dict.items():
             self.log(
@@ -180,7 +274,8 @@ class Trainer(pl.LightningModule):
         if isinstance(data, list):
             data = data[-1]
         out = self(data)
-        _, loss_dict = self.cal_loss(out, data)
+        _, loss_dict, aux_info = self.cal_loss(out, data)
+        self._log_best_mode_stats(aux_info, prefix="val/")
         metrics = self.val_metrics(out, data['target'][:, 0])
         if out['new_y_hat'] is not None:
             out['y_hat'] = out['new_y_hat']
@@ -323,7 +418,8 @@ class StreamTrainer(Trainer):
             cur_data = data[i + num_no_grad_frames]
             cur_data['memory_dict'] = memory_dict
             out = self(cur_data)
-            cur_loss, cur_loss_dict = self.cal_loss(out, cur_data, tag=f'step{i + num_no_grad_frames}_')
+            cur_loss, cur_loss_dict, aux_info = self.cal_loss(out, cur_data, tag=f'step{i + num_no_grad_frames}_')
+            self._log_best_mode_stats(aux_info, prefix="train/")
             loss_dict.update(cur_loss_dict)
             sum_loss += cur_loss
             memory_dict = out['memory_dict']
@@ -349,7 +445,8 @@ class StreamTrainer(Trainer):
                 return
             cur_data['memory_dict'] = memory_dict
             out = self(cur_data)
-            _, cur_loss_dict = self.cal_loss(out, cur_data, tag=f'step{i}_')
+            _, cur_loss_dict, aux_info = self.cal_loss(out, cur_data, tag=f'step{i}_')
+            self._log_best_mode_stats(aux_info, prefix="val/")
             memory_dict = out['memory_dict']
             all_outs.append(out)
         
