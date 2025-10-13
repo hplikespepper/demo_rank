@@ -14,6 +14,43 @@ except ImportError:
     RMSNorm, layer_norm_fn, rms_norm_fn = None, None, None
 
 
+class LinearAgentEncoder(nn.Module):
+    """
+    单层线性智能体历史信息编码器 (LTSF-Linear baseline)
+    
+    用于验证复杂序列模型（如Mamba）的必要性。
+    将历史序列展平后通过单层线性变换映射到嵌入空间，无bias。
+    
+    特点：
+    - 无时序建模能力（无法捕捉时间依赖）
+    - 参数量: hist_steps * feat_dim * embed_dim = 50 * 4 * 128 = 25,600
+    - 计算复杂度: O(L*D*C)
+    """
+    def __init__(self, hist_steps=50, feat_dim=4, embed_dim=128):
+        super().__init__()
+        self.hist_steps = hist_steps
+        self.feat_dim = feat_dim
+        self.input_dim = hist_steps * feat_dim
+        
+        # 单层线性变换，无bias以保持LTSF-Linear的纯粹性
+        self.encoder = nn.Linear(self.input_dim, embed_dim, bias=False)
+
+    def forward(self, hist_feat: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            hist_feat: [N_valid, L, D] 有效agent的历史特征
+                       L=hist_steps, D=feat_dim
+        Returns:
+            encoded_feat: [N_valid, C] 编码后特征, C=embed_dim
+        """
+        # 展平时序和特征维度: [N_valid, L, D] -> [N_valid, L*D]
+        flattened_feat = hist_feat.flatten(start_dim=1)
+        
+        # 线性变换: [N_valid, L*D] -> [N_valid, C]
+        encoded_feat = self.encoder(flattened_feat)
+        
+        return encoded_feat
+
 # only 'DeMo'
 class ModelForecast(nn.Module):
     def __init__(
@@ -24,32 +61,51 @@ class ModelForecast(nn.Module):
         qkv_bias=False,
         drop_path=0.2,
         future_steps: int = 60,
+        hist_steps: int = 50,          # <-- 新增：接收历史步数
+        agent_encoder_type: str = 'mamba',  # <-- 新增：编码器切换开关
         use_low_rank: bool = True,  # 添加低秩开关
         low_rank_dim: int = 16,     # 添加低秩维度
     ) -> None:
         super().__init__()
 
-        self.hist_embed_mlp = nn.Sequential(
-            nn.Linear(4, 64),
-            nn.GELU(),
-            nn.Linear(64, embed_dim),
-        )
+        self.agent_encoder_type = agent_encoder_type
+        self.embed_dim = embed_dim
 
-        # Agent Encoding Mamba
-        self.hist_embed_mamba = nn.ModuleList(  
-            [
-                create_block(  
-                    d_model=embed_dim,
-                    layer_idx=i,
-                    drop_path=0.2,  
-                    bimamba=False,  
-                    rms_norm=True,  
-                )
-                for i in range(4)
-            ]
-        )
-        self.norm_f = RMSNorm(embed_dim, eps=1e-5)
-        self.drop_path = DropPath(drop_path)
+        # Agent History Encoder: Mamba (序列模型) vs Linear (LTSF baseline)
+        if self.agent_encoder_type == 'mamba':
+            # Mamba编码器：具有时序建模能力的状态空间模型
+            self.hist_embed_mlp = nn.Sequential(
+                nn.Linear(4, 64),
+                nn.GELU(),
+                nn.Linear(64, embed_dim),
+            )
+            self.hist_embed_mamba = nn.ModuleList(
+                [
+                    create_block(
+                        d_model=embed_dim,
+                        layer_idx=i,
+                        drop_path=drop_path,
+                        bimamba=False,
+                        rms_norm=True,
+                    )
+                    for i in range(4)
+                ]
+            )
+            self.norm_f = RMSNorm(embed_dim, eps=1e-5)
+            self.drop_path = DropPath(drop_path)
+        
+        elif self.agent_encoder_type == 'linear':
+            # Linear编码器：LTSF-Linear baseline，无时序建模能力
+            self.linear_encoder = LinearAgentEncoder(
+                hist_steps=hist_steps,
+                feat_dim=4,  # (x_pos_diff, y_pos_diff, velocity_diff, valid_mask)
+                embed_dim=embed_dim
+            )
+        else:
+            raise ValueError(
+                f"Unknown agent_encoder_type: '{self.agent_encoder_type}'. "
+                f"Supported options: ['mamba', 'linear']"
+            )
 
         self.lane_embed = LaneEmbeddingLayer(3, embed_dim)
 
@@ -134,28 +190,46 @@ class ModelForecast(nn.Module):
         hist_feat = hist_feat.view(B * N, L, D)
         hist_feat_key_valid = hist_key_valid_mask.view(B * N)
 
-        # unidirectional mamba
-        actor_feat = self.hist_embed_mlp(hist_feat[hist_feat_key_valid].contiguous())
-        residual = None
-        for blk_mamba in self.hist_embed_mamba:
-            actor_feat, residual = blk_mamba(actor_feat, residual)
-        fused_add_norm_fn = rms_norm_fn if isinstance(self.norm_f, RMSNorm) else layer_norm_fn
-        actor_feat = fused_add_norm_fn(
-            self.drop_path(actor_feat),
-            self.norm_f.weight,
-            self.norm_f.bias,
-            eps=self.norm_f.eps,
-            residual=residual,
-            prenorm=False,
-            residual_in_fp32=True  
-        )
+        # Agent history encoding: 只对有效actor进行编码以节省计算
+        if self.agent_encoder_type == 'mamba':
+            # Mamba编码器流程
+            actor_feat_valid = self.hist_embed_mlp(
+                hist_feat[hist_feat_key_valid].contiguous()
+            )
+            residual = None
+            for blk_mamba in self.hist_embed_mamba:
+                actor_feat_valid, residual = blk_mamba(actor_feat_valid, residual)
+            
+            # RMS normalization with residual fusion
+            fused_add_norm_fn = rms_norm_fn if isinstance(self.norm_f, RMSNorm) else layer_norm_fn
+            actor_feat_valid = fused_add_norm_fn(
+                self.drop_path(actor_feat_valid),
+                self.norm_f.weight,
+                self.norm_f.bias,
+                eps=self.norm_f.eps,
+                residual=residual,
+                prenorm=False,
+                residual_in_fp32=True
+            )
+            # 提取最后一个时间步作为agent表示
+            actor_feat_valid = actor_feat_valid[:, -1]
 
-        actor_feat = actor_feat[:, -1]
-        actor_feat_tmp = torch.zeros(
-            B * N, actor_feat.shape[-1], device=actor_feat.device
+        elif self.agent_encoder_type == 'linear':
+            # Linear编码器流程：只对有效actor进行编码
+            actor_feat_valid = self.linear_encoder(
+                hist_feat[hist_feat_key_valid].contiguous()
+            )
+        
+        # 将有效actor特征填充到完整tensor [B*N, C]
+        actor_feat = torch.zeros(
+            B * N, actor_feat_valid.shape[-1], 
+            device=actor_feat_valid.device, 
+            dtype=actor_feat_valid.dtype
         )
-        actor_feat_tmp[hist_feat_key_valid] = actor_feat
-        actor_feat = actor_feat_tmp.view(B, N, actor_feat.shape[-1])
+        actor_feat[hist_feat_key_valid] = actor_feat_valid
+        
+        # Reshape为 [B, N, C]
+        actor_feat = actor_feat.view(B, N, -1)
 
         # map encoding
         lane_valid_mask = data["lane_valid_mask"]

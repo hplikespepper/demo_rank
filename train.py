@@ -11,6 +11,7 @@ from pytorch_lightning.callbacks import (
     RichProgressBar,
 )
 from pytorch_lightning.loggers import TensorBoardLogger
+from pytorch_lightning.utilities.model_summary import ModelSummary
 
 
 @hydra.main(version_base=None, config_path="conf", config_name="config")
@@ -49,6 +50,14 @@ def main(conf):
     )
 
     model = instantiate(conf.model.target)
+    
+    # Save model parameters count using ModelSummary
+    summary = ModelSummary(model, max_depth=1)
+    with open(f'{output_dir}/parameters.txt', 'w') as f:
+        f.write(f"Total parameters: {summary.total_parameters:,}\n")
+        f.write(f"Trainable parameters: {summary.trainable_parameters:,}\n")
+        f.write(f"Non-trainable parameters: {summary.total_parameters - summary.trainable_parameters:,}\n")
+    
     os.system('cp -a %s %s' % ('conf', output_dir))
     os.system('cp -a %s %s' % ('src', output_dir))
     with open(f'{output_dir}/model.txt', 'w') as f:
