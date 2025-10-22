@@ -110,31 +110,83 @@
 
 
 
-set -e
+# set -e
 
-# --- 在这里设置公共命令 ---
-# 将 GPU 设备 ID 和 python 命令设置为一个变量
-export CUDA_VISIBLE_DEVICES=4,5,6,7
+# # --- 在这里设置公共命令 ---
+# # 将 GPU 设备 ID 和 python 命令设置为一个变量
+# export CUDA_VISIBLE_DEVICES=4,5,6,7
 
-echo "开始执行实验..."
-start_time=$(date +%s)
-echo "开始时间: $(date)"
+# echo "开始执行实验..."
+# start_time=$(date +%s)
+# echo "开始时间: $(date)"
 
-# 实验：低秩分解 rank=32, 使用Linear编码器
-echo "------------------------------------"
-echo "正在运行实验4:低秩分解 rank=32 (lowrank_r32), 使用Linear编码器"
-echo "------------------------------------"
-python train.py model.target.model.low_rank_dim=32 model.target.model.agent_encoder_type=linear output=lowrank_r32_linear gpus=4
+# # 实验：低秩分解 rank=32, 使用Linear编码器
+# echo "------------------------------------"
+# echo "正在运行实验4:低秩分解 rank=32 (lowrank_r32), 使用Linear编码器"
+# echo "------------------------------------"
+# python train.py model.target.model.low_rank_dim=32 model.target.model.agent_encoder_type=linear output=lowrank_r32_linear gpus=4
 
-# 实验：原始方案（不使用低秩）, 使用Linear编码器
-echo "------------------------------------"
-echo "正在运行实验1:原始方案 (original_demo), 使用Linear编码器"
-echo "------------------------------------"
-python train.py model.target.model.use_low_rank=False model.target.model.agent_encoder_type=linear output=original_demo_linear gpus=4
+# # 实验：原始方案（不使用低秩）, 使用Linear编码器
+# echo "------------------------------------"
+# echo "正在运行实验1:原始方案 (original_demo), 使用Linear编码器"
+# echo "------------------------------------"
+# python train.py model.target.model.use_low_rank=False model.target.model.agent_encoder_type=linear output=original_demo_linear gpus=4
 
 
-echo "------------------------------------"
-echo "所有实验均已完成！"
-echo "完成时间: $(date)"
-echo "总耗时: $(( ($(date +%s) - start_time) / 60 )) 分钟"
-echo "------------------------------------"
+# echo "------------------------------------"
+# echo "所有实验均已完成！"
+# echo "完成时间: $(date)"
+# echo "总耗时: $(( ($(date +%s) - start_time) / 60 )) 分钟"
+# echo "------------------------------------"
+
+
+set -e 
+
+# --- 在这里设置公共命令 --- 
+# 将 GPU 设备 ID 和 python 命令设置为一个变量 
+export CUDA_VISIBLE_DEVICES=4,5,6,7 
+
+echo "开始执行实验..." 
+total_start_time=$(date +%s) 
+echo "总开始时间: $(date)" 
+
+# 定义seed范围
+SEEDS=(44 45 46)
+
+# 循环执行2次实验
+for seed in "${SEEDS[@]}"
+do
+    echo "===================================="
+    echo "正在运行实验: 低秩分解 rank=32 - Seed: $seed"
+    echo "===================================="
+    
+    # 记录单次实验开始时间
+    exp_start_time=$(date +%s)
+    echo "实验开始时间: $(date)"
+    
+    # # 执行训练命令，输出目录包含seed信息
+    # python train.py \
+    #     model.model.use_low_rank=False \
+    #     output=original_demo_seed${seed} \
+    #     gpus=4 \
+    #     seed=$seed
+
+    python train.py model.target.model.low_rank_dim=32 output=lowrank_r32_simplify_seed/seed_${seed} gpus=4 seed=$seed
+    
+    # 记录单次实验结束时间
+    exp_end_time=$(date +%s)
+    exp_duration=$((exp_end_time - exp_start_time))
+    echo "Seed $seed 实验完成，用时: $((exp_duration / 60)) 分钟 $((exp_duration % 60)) 秒"
+    echo "------------------------------------"
+    echo ""
+done
+
+# 计算总时间
+total_end_time=$(date +%s)
+total_duration=$((total_end_time - total_start_time))
+
+echo "===================================="
+echo "所有实验完成!"
+echo "总用时: $((total_duration / 3600)) 小时 $((total_duration % 3600 / 60)) 分钟 $((total_duration % 60)) 秒"
+echo "结束时间: $(date)"
+echo "===================================="

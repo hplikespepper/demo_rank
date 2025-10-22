@@ -1,5 +1,5 @@
 #!/bin/bash
-
+set -e
 # 批量评估original_demo_seed下不同seed目录中的模型性能
 # 该脚本会评估seed42到seed50的9个模型
 
@@ -10,13 +10,18 @@ export CUDA_VISIBLE_DEVICES=4
 
 # 定义seed范围
 # seeds=(42 43 44 45 46 47 48 49 50)
-seeds=(42 43 46 47 50)
+seeds=(43 44 47 49 50)
+
+# seeds=(42)
 
 # 基础路径
-# base_path="outputs/original_demo_seed"
+base_path="outputs/original_demo_seed"
 # output_base="original_seed_result"
-base_path="outputs/lowrank_r32_seed"
-output_base="lowrank_seed_result"
+output_base="original_seed_result_class_3"
+
+# base_path="outputs/lowrank_r32_seed"
+# # output_base="lowrank_seed_result"
+# output_base="lowrank_seed_result_class_3"
 
 # 遍历所有seeds
 for seed in "${seeds[@]}"; do
@@ -26,8 +31,8 @@ for seed in "${seeds[@]}"; do
     echo "=================================================="
     
     # 查找checkpoint路径
-    # seed_dir="${base_path}/seed${seed}"
-    seed_dir="${base_path}/lowrank_r32_seed${seed}"
+    seed_dir="${base_path}/seed${seed}"               #记得换
+    # seed_dir="${base_path}/lowrank_r32_seed${seed}"
     if [ ! -d "$seed_dir" ]; then
         echo "Warning: $seed_dir does not exist, skipping..."
         continue
@@ -64,8 +69,23 @@ for seed in "${seeds[@]}"; do
     #     "output='$output_dir'" \
     #     gpus=1
 
-    python eval.py \
-        model.target.model.low_rank_dim=32 \
+    # # 普通评估
+    # python eval.py \
+    #     model.target.model.low_rank_dim=32 \
+    #     "checkpoint='$checkpoint_path'" \
+    #     "output='$output_dir'" \
+    #     gpus=1
+    
+    # # 按agent类型评估
+    # python eval_type2.py \
+    #     model.target.model.low_rank_dim=32 \
+    #     "checkpoint='$checkpoint_path'" \
+    #     "output='$output_dir'" \
+    #     gpus=1
+
+    # # 按agent类型评估
+    python eval_type2.py \
+        model.target.model.use_low_rank=False \
         "checkpoint='$checkpoint_path'" \
         "output='$output_dir'" \
         gpus=1

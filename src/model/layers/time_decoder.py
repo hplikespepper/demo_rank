@@ -182,25 +182,26 @@ class TimeDecoder(nn.Module):
         self.predictor = GMMPredictor(future_len)
 
         ###### Hybrid Coupling Module ######
-        # hybrid self attention
-        self.self_block_dense = nn.ModuleList(
-            Block()
-            for i in range(3)
-        )
+        # --- START: MODIFICATION ---
+        # 移除 self_block_dense
+        # self.self_block_dense = nn.ModuleList(
+        #     Block()
+        #     for i in range(3)
+        # )
 
-        # hybrid cross attention
+        # hybrid cross attention (保留)
         self.cross_block_dense = nn.ModuleList(
             Cross_Block()
             for i in range(3)
         )
 
-        # mode self attention for hybrid spatiotemporal queries
+        # mode self attention for hybrid spatiotemporal queries (简化为1层)
         self.self_block_different_mode = nn.ModuleList(
             Block()
-            for i in range(3)
+            for i in range(1) # 从3层减少到1层
         )
 
-        # state bidirectional mamba for hybrid spatiotemporal queries 
+        # state bidirectional mamba for hybrid spatiotemporal queries (保留)
         self.dense_embed_mamba = nn.ModuleList(  
             [
                 create_block(  
@@ -215,6 +216,7 @@ class TimeDecoder(nn.Module):
         )
         self.dense_norm_f = RMSNorm(dim, eps=1e-5)
         self.dense_drop_path = DropPath(0.2)
+        # --- END: MODIFICATION ---
 
         # MLP for final output
         self.predictor_dense = GMMPredictor_dense(future_len)
@@ -271,19 +273,25 @@ class TimeDecoder(nn.Module):
         # 组合方式：每个模式使用自己的状态查询
         mode_dense = mode[:, :, None, :] + mode_specific_states  # [B, K, T, C]
         
-        # 后续处理保持不变
+        # --- START: MODIFICATION ---
+        # 重塑并与场景上下文进行最终交互 (保留)
         mode_dense = mode_dense.reshape(B, -1, C)
         for blk in self.cross_block_dense:
             mode_dense = blk(mode_dense, encoding, key_padding_mask=mask)
-        for blk in self.self_block_dense:
-            mode_dense = blk(mode_dense)
+        
+        # 移除全局自注意力 (self_block_dense)
+        # for blk in self.self_block_dense:
+        #     mode_dense = blk(mode_dense)
+
         mode_dense = mode_dense.reshape(B, K, T, C)
         
+        # 简化为极薄的 Mode-only 自注意力 (保留并简化)
         mode_dense = mode_dense.transpose(1, 2).reshape(-1, K, C)
         for blk in self.self_block_different_mode:
             mode_dense = blk(mode_dense)
         mode_dense = mode_dense.reshape(B, -1, K, C).transpose(1, 2)
 
+        # 时序连贯性检查 (保留)
         mode_dense = mode_dense.reshape(-1, T, C)
         residual = None
         for blk_mamba in self.dense_embed_mamba:
@@ -299,6 +307,7 @@ class TimeDecoder(nn.Module):
             residual_in_fp32=True  
         )
         mode_dense = mode_dense.reshape(B, K, T, C)
+        # --- END: MODIFICATION ---
 
         y_hat_new, pi_new, scal_new = self.predictor_dense(mode_dense)
 

@@ -8,13 +8,13 @@ target:
     embed_dim: 128
     future_steps: 60
     hist_steps: 50  # 历史时间步数，需与datamodule中的num_historical_steps一致
-    agent_encoder_type: 'linear'  # Agent编码器: 'mamba' (序列模型) | 'linear' (LTSF baseline)
+    agent_encoder_type: 'mamba'  # Agent历史轨迹编码器: 'mamba' (序列模型) | 'linear' (LTSF baseline)
     num_heads: 8
     mlp_ratio: 4.0
     qkv_bias: False
     drop_path: 0.2
     use_low_rank: True  # 启用低秩分解
-    low_rank_dim: 16    # 低秩维度
+    low_rank_dim: 32    # 低秩维度,默认32
   pretrained_weights: ${pretrained_weights}
   lr: ${lr}
   weight_decay: ${weight_decay}

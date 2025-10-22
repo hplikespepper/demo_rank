@@ -11,7 +11,7 @@ import statistics
 from collections import defaultdict
 
 
-def find_summary_metrics_files(base_dir="outputs/original_seed_result", target_seeds=[42, 43, 46, 47, 50]):    # lowrank_seed_result, original_seed_result
+def find_summary_metrics_files(base_dir="outputs/original_seed_result_class_3", target_seeds=[42, 43, 46, 47, 50]):    # lowrank_seed_result, original_seed_result, original_seed_result_class_3, lowrank_seed_result_class_3
     """查找指定seed目录下的summary_metrics.txt文件"""
     summary_files = {}
     
@@ -39,7 +39,8 @@ def find_summary_metrics_files(base_dir="outputs/original_seed_result", target_s
         
         # 取最新的timestamp目录
         latest_timestamp = sorted(timestamp_dirs)[-1]
-        summary_file = os.path.join(latest_timestamp, "summary_metrics.txt")
+        # summary_file = os.path.join(latest_timestamp, "summary_metrics.txt")  # lowrank_seed_result, original_seed_result
+        summary_file = os.path.join(latest_timestamp, "summary_metrics_type.txt")    # original_seed_result_class, lowrank_seed_result_class
         
         if os.path.exists(summary_file):
             summary_files[seed_num] = summary_file
@@ -108,11 +109,21 @@ def main():
     print("开始分析批量评估结果...")
     
     # 指定要分析的seeds
-    target_seeds = [43, 44, 47, 49, 50]
+    target_seeds = [43, 44, 47, 49, 50] 
+    result_dir="outputs/lowrank_seed_result_class_3"   # lowrank_seed_result, original_seed_result, original_seed_result_class_3, lowrank_seed_result_class_3
+
+    # 创建输出目录
+    # output_dir = "outputs/original_seed_result"
+    # output_dir = "outputs/lowrank_seed_result"
+    # output_dir = "outputs/original_seed_result_class_3"
+    output_dir = "outputs/lowrank_seed_result_class_3"
+
+    os.makedirs(output_dir, exist_ok=True)
+
     print(f"指定分析的seeds: {target_seeds}")
     
     # 查找指定seeds的结果文件
-    summary_files = find_summary_metrics_files(target_seeds=target_seeds)
+    summary_files = find_summary_metrics_files(base_dir=result_dir, target_seeds=target_seeds)
     
     if not summary_files:
         print("错误: 没有找到任何summary_metrics.txt文件")
@@ -143,10 +154,6 @@ def main():
     print("统计结果汇总")
     print(f"{'='*60}")
     
-    # 创建输出目录
-    output_dir = "outputs/original_seed_result"
-    # output_dir = "outputs/lowrank_seed_result"
-    os.makedirs(output_dir, exist_ok=True)
     
     # 保存统计结果到文件
     stats_file = os.path.join(output_dir, "evaluation_statistics.txt")
@@ -166,42 +173,43 @@ def main():
     
     print(f"统计结果已保存到: {stats_file}")
     
-    # 在控制台输出主要指标（后面12个关键指标）
-    key_metrics = [
-        'val_MR', 'val_minADE1', 'val_minADE6', 'val_minFDE1', 'val_minFDE6', 'val_b-minFDE6',
-        'val_new_MR', 'val_new_minADE1', 'val_new_minADE6', 'val_new_minFDE1', 'val_new_minFDE6', 'val_new_b-minFDE6'
-    ]
+    # 以下适用于lowrank_seed_result, original_seed_result，不适用于分类测试
+    # # 在控制台输出主要指标（后面12个关键指标）
+    # key_metrics = [
+    #     'val_MR', 'val_minADE1', 'val_minADE6', 'val_minFDE1', 'val_minFDE6', 'val_b-minFDE6',
+    #     'val_new_MR', 'val_new_minADE1', 'val_new_minADE6', 'val_new_minFDE1', 'val_new_minFDE6', 'val_new_b-minFDE6'
+    # ]
     
-    print(f"\n{'='*60}")
-    print("主要指标统计结果（指定seeds的关键指标）")
-    print(f"{'='*60}")
-    print(f"{'指标名称':<25} {'平均值':<12} {'标准差':<12} {'样本数':<8}")
-    print("-" * 60)
+    # print(f"\n{'='*60}")
+    # print("主要指标统计结果（指定seeds的关键指标）")
+    # print(f"{'='*60}")
+    # print(f"{'指标名称':<25} {'平均值':<12} {'标准差':<12} {'样本数':<8}")
+    # print("-" * 60)
     
-    for key in key_metrics:
-        if key in stats:
-            stat = stats[key]
-            print(f"{key:<25} {stat['mean']:<12.6f} {stat['std']:<12.6f} {stat['count']:<8}")
+    # for key in key_metrics:
+    #     if key in stats:
+    #         stat = stats[key]
+    #         print(f"{key:<25} {stat['mean']:<12.6f} {stat['std']:<12.6f} {stat['count']:<8}")
     
-    # 保存主要指标的专门统计文件
-    key_stats_file = os.path.join(output_dir, "key_metrics_statistics.txt")
-    with open(key_stats_file, 'w', encoding='utf-8') as f:
-        f.write("=== 主要指标统计结果（指定seeds的关键指标） ===\n")
-        f.write(f"评估的seeds: {sorted(all_metrics.keys())}\n")
-        f.write(f"成功评估数量: {len(all_metrics)}\n\n")
+    # # 保存主要指标的专门统计文件
+    # key_stats_file = os.path.join(output_dir, "key_metrics_statistics.txt")
+    # with open(key_stats_file, 'w', encoding='utf-8') as f:
+    #     f.write("=== 主要指标统计结果（指定seeds的关键指标） ===\n")
+    #     f.write(f"评估的seeds: {sorted(all_metrics.keys())}\n")
+    #     f.write(f"成功评估数量: {len(all_metrics)}\n\n")
         
-        for key in key_metrics:
-            if key in stats:
-                stat = stats[key]
-                f.write(f"{key}:\n")
-                f.write(f"  平均值: {stat['mean']:.8f}\n")
-                f.write(f"  标准差: {stat['std']:.8f}\n")
-                f.write(f"  最小值: {stat['min']:.8f}\n")
-                f.write(f"  最大值: {stat['max']:.8f}\n")
-                f.write(f"  样本数: {stat['count']}\n")
-                f.write(f"  原始值: {[f'{v:.6f}' for v in stat['values']]}\n\n")
+    #     for key in key_metrics:
+    #         if key in stats:
+    #             stat = stats[key]
+    #             f.write(f"{key}:\n")
+    #             f.write(f"  平均值: {stat['mean']:.8f}\n")
+    #             f.write(f"  标准差: {stat['std']:.8f}\n")
+    #             f.write(f"  最小值: {stat['min']:.8f}\n")
+    #             f.write(f"  最大值: {stat['max']:.8f}\n")
+    #             f.write(f"  样本数: {stat['count']}\n")
+    #             f.write(f"  原始值: {[f'{v:.6f}' for v in stat['values']]}\n\n")
     
-    print(f"\n主要指标统计结果已保存到: {key_stats_file}")
+    # print(f"\n主要指标统计结果已保存到: {key_stats_file}")
     
     # 保存详细结果
     detailed_file = os.path.join(output_dir, "detailed_results.txt")

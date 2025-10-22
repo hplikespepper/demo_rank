@@ -168,3 +168,4 @@ checkpoints/
 assets/
 plot*/
 data/
+*.png
