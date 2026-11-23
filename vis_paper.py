@@ -1,6 +1,7 @@
 """
 Visualization script for trajectory prediction using trained DeMo model.
-可视化DeMo模型的轨迹预测结果
+Paper-ready version with fixed image size centered on trajectory.
+固定图片大小的轨迹预测可视化，适合论文展示
 """
 
 import torch
@@ -9,8 +10,7 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import argparse
 
-# Import model and dataset
-from src.model.trainer_forecast import Trainer
+# Import dataset
 from src.datamodule.av2_dataset import Av2Dataset
 
 # Import av2 visualization
@@ -18,52 +18,25 @@ from av2.datasets.motion_forecasting.viz.scenario_visualization import visualize
 from av2.datasets.motion_forecasting.scenario_serialization import load_argoverse_scenario_parquet
 
 
-def load_model_and_data(checkpoint_path, scene_idx=None, scene_id=None):
-    """Load trained model and specified validation scene.
+def load_validation_scene(scene_idx=None, scene_id=None, data_root="data/DeMo_processed", load_scene=True):
+    """Load specified validation scene metadata without loading a model.
     
     Args:
-        checkpoint_path: Path to the model checkpoint file.
         scene_idx: Index of the validation scene to visualize (0-based).
         scene_id: Scenario ID to visualize (alternative to scene_idx).
+        data_root: Root directory of processed DeMo data.
+        load_scene: Whether to load model input tensors for the selected scene.
     """
-    
+
     # Check that exactly one of scene_idx or scene_id is provided
     if scene_idx is None and scene_id is None:
         raise ValueError("Either scene_idx or scene_id must be provided")
     if scene_idx is not None and scene_id is not None:
         raise ValueError("Only one of scene_idx or scene_id should be provided")
-    
-    # Load checkpoint
-    print(f"Loading checkpoint from: {checkpoint_path}")
-    
-    checkpoint = torch.load(checkpoint_path, map_location='cpu')
-    
-    # Create model from checkpoint
-    from omegaconf import OmegaConf
-    hparams = checkpoint['hyper_parameters']
-    model_cfg = OmegaConf.to_container(hparams['model'], resolve=True) if hasattr(hparams['model'], '_metadata') else dict(hparams['model'])
-    
-    if 'type' not in model_cfg:
-        model_cfg['type'] = 'ModelForecast'
-    
-    hparams_dict = {
-        'model': model_cfg,
-        'pretrained_weights': hparams.get('pretrained_weights', None),
-        'lr': hparams['lr'],
-        'warmup_epochs': hparams['warmup_epochs'],
-        'epochs': hparams['epochs'],
-        'weight_decay': hparams['weight_decay']
-    }
-    
-    model = Trainer(**hparams_dict)
-    model.load_state_dict(checkpoint['state_dict'])
-    model.eval()
-    model.cuda()
-    print("Model loaded successfully!")
-    
+
     # Load validation dataset
     val_dataset = Av2Dataset(
-        data_root="data/DeMo_processed",
+        data_root=data_root,
         split="val",
         num_historical_steps=50,
         sequence_origins=[50],
@@ -91,17 +64,67 @@ def load_model_and_data(checkpoint_path, scene_idx=None, scene_id=None):
     if scene_idx < 0 or scene_idx >= len(val_dataset):
         raise ValueError(f"Scene index {scene_idx} is out of range. Valid range: 0-{len(val_dataset)-1}")
     
-    # Get specified scene
-    print(f"Loading scene at index: {scene_idx}")
-    scene = val_dataset[scene_idx]
-    if isinstance(scene, list):
-        scene = scene[-1]
-    
     # Get scenario_id from raw data
     raw_data = torch.load(val_dataset.file_list[scene_idx])
     scenario_id = raw_data['scenario_id']
     print(f"Processing scenario: {scenario_id}")
+
+    scene = None
+    if load_scene:
+        # Get specified scene
+        print(f"Loading scene at index: {scene_idx}")
+        scene = val_dataset[scene_idx]
+        if isinstance(scene, list):
+            scene = scene[-1]
+
+    return scene, scenario_id, raw_data
+
+
+def load_model_and_data(checkpoint_path, scene_idx=None, scene_id=None, data_root="data/DeMo_processed"):
+    """Load trained model and specified validation scene.
     
+    Args:
+        checkpoint_path: Path to the model checkpoint file.
+        scene_idx: Index of the validation scene to visualize (0-based).
+        scene_id: Scenario ID to visualize (alternative to scene_idx).
+        data_root: Root directory of processed DeMo data.
+    """
+
+    # Load checkpoint
+    print(f"Loading checkpoint from: {checkpoint_path}")
+    
+    checkpoint = torch.load(checkpoint_path, map_location='cpu')
+    
+    # Create model from checkpoint
+    from omegaconf import OmegaConf
+    from src.model.trainer_forecast import Trainer
+    hparams = checkpoint['hyper_parameters']
+    model_cfg = OmegaConf.to_container(hparams['model'], resolve=True) if hasattr(hparams['model'], '_metadata') else dict(hparams['model'])
+    
+    if 'type' not in model_cfg:
+        model_cfg['type'] = 'ModelForecast'
+    
+    hparams_dict = {
+        'model': model_cfg,
+        'pretrained_weights': hparams.get('pretrained_weights', None),
+        'lr': hparams['lr'],
+        'warmup_epochs': hparams['warmup_epochs'],
+        'epochs': hparams['epochs'],
+        'weight_decay': hparams['weight_decay']
+    }
+    
+    model = Trainer(**hparams_dict)
+    model.load_state_dict(checkpoint['state_dict'])
+    model.eval()
+    model.cuda()
+    print("Model loaded successfully!")
+
+    scene, scenario_id, raw_data = load_validation_scene(
+        scene_idx=scene_idx,
+        scene_id=scene_id,
+        data_root=data_root
+    )
+
     return model, scene, scenario_id, raw_data
 
 
@@ -174,8 +197,21 @@ def transform_to_global(predictions, raw_data, step=49):
     return predictions_global
 
 
-def visualize_with_av2(scenario_id, predictions_global, probabilities, save_dir='./viz_traj'):
-    """Visualize predictions using official av2 visualization style."""
+def visualize_with_fixed_size(scenario_id, predictions_global, probabilities, raw_data,
+                              save_dir='./viz_traj', fig_width=120, fig_height=80,
+                              only_truth=False):
+    """Visualize predictions using fixed image size centered on trajectory.
+    
+    Args:
+        scenario_id: Scenario ID
+        predictions_global: Predicted trajectories in global coordinates [6, 60, 2]
+        probabilities: Trajectory probabilities [6]
+        raw_data: Raw scenario data containing focal agent trajectory
+        save_dir: Directory to save visualization
+        fig_width: Fixed width of the view in meters (default: 120m)
+        fig_height: Fixed height of the view in meters (default: 80m)
+        only_truth: If True, skip drawing predicted trajectories.
+    """
     from av2.map.map_api import ArgoverseStaticMap
     from av2.datasets.motion_forecasting.data_schema import ObjectType, TrackCategory
     from matplotlib.patches import Rectangle
@@ -188,7 +224,6 @@ def visualize_with_av2(scenario_id, predictions_global, probabilities, save_dir=
     _ESTIMATED_VEHICLE_WIDTH_M = 2.0
     _ESTIMATED_CYCLIST_LENGTH_M = 2.0
     _ESTIMATED_CYCLIST_WIDTH_M = 0.7
-    _PLOT_BOUNDS_BUFFER_M = 30.0
     
     _DRIVABLE_AREA_COLOR = "#7A7A7A"
     _LANE_SEGMENT_COLOR = "#E0E0E0"
@@ -220,8 +255,37 @@ def visualize_with_av2(scenario_id, predictions_global, probabilities, save_dir=
     scenario = load_argoverse_scenario_parquet(scenario_file)
     static_map = ArgoverseStaticMap.from_json(map_file)
     
-    # Create figure
-    fig, ax = plt.subplots(figsize=(16, 16))
+    # Calculate center point from focal agent trajectory
+    # Find focal track from scenario
+    focal_track = None
+    for track in scenario.tracks:
+        if track.category == TrackCategory.FOCAL_TRACK:
+            focal_track = track
+            break
+    
+    if focal_track is None:
+        raise ValueError("No focal track found in scenario")
+    
+    # Get full trajectory from focal track
+    actor_timesteps = np.array([state.timestep for state in focal_track.object_states])
+    full_trajectory = np.array([list(state.position) for state in focal_track.object_states])
+    
+    # Calculate center as the mean of the full trajectory
+    center_x = full_trajectory[:, 0].mean()
+    center_y = full_trajectory[:, 1].mean()
+    
+    print(f"Center point: ({center_x:.2f}, {center_y:.2f})")
+    print(f"Fixed view size: {fig_width}m x {fig_height}m")
+    
+    # Calculate plot bounds centered on trajectory
+    x_min = center_x - fig_width / 2
+    x_max = center_x + fig_width / 2
+    y_min = center_y - fig_height / 2
+    y_max = center_y + fig_height / 2
+    
+    # Create figure with landscape orientation (width > height)
+    aspect_ratio = fig_width / fig_height
+    fig, ax = plt.subplots(figsize=(12, 12/aspect_ratio))
     
     # Plot drivable areas (official style)
     for drivable_area in static_map.vector_drivable_areas.values():
@@ -238,7 +302,6 @@ def visualize_with_av2(scenario_id, predictions_global, probabilities, save_dir=
                 color=_LANE_SEGMENT_COLOR, linewidth=0.5, zorder=2)
     
     # Plot agent tracks with official style
-    track_bounds = None
     for track in scenario.tracks:
         # Get all valid timesteps
         actor_timesteps = np.array([state.timestep for state in track.object_states])
@@ -265,22 +328,34 @@ def visualize_with_av2(scenario_id, predictions_global, probabilities, save_dir=
             continue
         
         if is_focal:
-            # Calculate bounds from full trajectory
-            x_min, x_max = actor_trajectory[:, 0].min(), actor_trajectory[:, 0].max()
-            y_min, y_max = actor_trajectory[:, 1].min(), actor_trajectory[:, 1].max()
-            track_bounds = (x_min, x_max, y_min, y_max)
-            
             # Plot history in orange
             if len(history_trajectory) > 0:
                 plt.plot(history_trajectory[:, 0], history_trajectory[:, 1], 
-                        color=_FOCAL_AGENT_COLOR, linewidth=3, linestyle='-', 
+                        color=_FOCAL_AGENT_COLOR, linewidth=3.5, linestyle='-', 
                         label='Historical Trajectory', zorder=5)
             
-            # Plot future ground truth in red (solid line)
+            # Plot future ground truth in red (solid line) with arrow
             if len(future_trajectory) > 0:
                 plt.plot(future_trajectory[:, 0], future_trajectory[:, 1], 
-                        color=_FOCAL_AGENT_FUTURE_COLOR, linewidth=3, linestyle='-', 
+                        color=_FOCAL_AGENT_FUTURE_COLOR, linewidth=3.5, linestyle='-', 
                         label='Ground Truth', zorder=5)
+                
+                # Add arrow at the end of ground truth trajectory
+                # Use a longer segment (last 5 points or available) for stable direction
+                if len(future_trajectory) >= 2:
+                    look_back = min(5, len(future_trajectory))
+                    dx = future_trajectory[-1, 0] - future_trajectory[-look_back, 0]
+                    dy = future_trajectory[-1, 1] - future_trajectory[-look_back, 1]
+                    # Normalize and scale for arrow length
+                    magnitude = np.sqrt(dx**2 + dy**2)
+                    if magnitude > 0.1:  # Only draw arrow if there's significant movement
+                        arrow_length = 2.0
+                        dx_norm = (dx / magnitude) * arrow_length
+                        dy_norm = (dy / magnitude) * arrow_length
+                        plt.arrow(future_trajectory[-1, 0] - dx_norm, future_trajectory[-1, 1] - dy_norm, 
+                                 dx_norm, dy_norm,
+                                 head_width=1.5, head_length=2.0, fc=_FOCAL_AGENT_FUTURE_COLOR, 
+                                 ec=_FOCAL_AGENT_FUTURE_COLOR, linewidth=2, alpha=0.8, zorder=6)
             
             track_color = _FOCAL_AGENT_COLOR
         elif is_av:
@@ -319,61 +394,72 @@ def visualize_with_av2(scenario_id, predictions_global, probabilities, save_dir=
             )
             ax.add_patch(vehicle_bbox)
     
-    # Add predicted trajectories with blue color and arrows
-    prediction_color = '#1E88E5'  # Blue color for predictions
-    prediction_plotted = False  # Flag to add legend only once
-    
-    for i, traj in enumerate(predictions_global):
-        # Plot trajectory line
-        line_label = 'Predicted Trajectories' if not prediction_plotted else None
-        plt.plot(traj[:, 0], traj[:, 1], 
-                color=prediction_color, linewidth=2.5, alpha=0.8,
-                linestyle='-', label=line_label, zorder=10)
+    if not only_truth:
+        # Add predicted trajectories with blue color and arrows
+        prediction_color = '#1E88E5'  # Blue color for predictions
+        prediction_plotted = False  # Flag to add legend only once
         
-        # Add arrow at the end point
-        if len(traj) >= 2:
-            # Calculate direction from second-to-last to last point
-            dx = traj[-1, 0] - traj[-2, 0]
-            dy = traj[-1, 1] - traj[-2, 1]
-            plt.arrow(traj[-2, 0], traj[-2, 1], dx, dy,
-                     head_width=1.5, head_length=2.0, fc=prediction_color, 
-                     ec=prediction_color, linewidth=2, alpha=0.8, zorder=11)
-        
-        prediction_plotted = True
+        for i, traj in enumerate(predictions_global):
+            # Plot trajectory line
+            line_label = 'Predicted Trajectories' if not prediction_plotted else None
+            plt.plot(traj[:, 0], traj[:, 1], 
+                    color=prediction_color, linewidth=3.5, alpha=0.8,
+                    linestyle='-', label=line_label, zorder=10)
+            
+            # Add arrow at the end point
+            # Use a longer segment (last 5 points or available) for stable direction
+            if len(traj) >= 2:
+                look_back = min(5, len(traj))
+                dx = traj[-1, 0] - traj[-look_back, 0]
+                dy = traj[-1, 1] - traj[-look_back, 1]
+                # Normalize and scale for arrow length
+                magnitude = np.sqrt(dx**2 + dy**2)
+                if magnitude > 0.1:  # Only draw arrow if there's significant movement
+                    arrow_length = 2.0
+                    dx_norm = (dx / magnitude) * arrow_length
+                    dy_norm = (dy / magnitude) * arrow_length
+                    plt.arrow(traj[-1, 0] - dx_norm, traj[-1, 1] - dy_norm, 
+                             dx_norm, dy_norm,
+                             head_width=1.5, head_length=2.0, fc=prediction_color, 
+                             ec=prediction_color, linewidth=2, alpha=0.8, zorder=11)
+            
+            prediction_plotted = True
+    else:
+        print("Only truth mode enabled: skipping predicted trajectories.")
     
-    # Set map bounds
-    if track_bounds:
-        plt.xlim(track_bounds[0] - _PLOT_BOUNDS_BUFFER_M, track_bounds[1] + _PLOT_BOUNDS_BUFFER_M)
-        plt.ylim(track_bounds[2] - _PLOT_BOUNDS_BUFFER_M, track_bounds[3] + _PLOT_BOUNDS_BUFFER_M)
+    # Set FIXED plot bounds centered on trajectory
+    plt.xlim(x_min, x_max)
+    plt.ylim(y_min, y_max)
     
     plt.gca().set_aspect("equal", adjustable="box")
-    plt.legend(loc='upper right', fontsize=14, framealpha=0.95)
-    plt.title(f'Multimodal Trajectory Predictions\nScenario: {scenario_id}', 
-             fontsize=16, fontweight='bold')
+    plt.legend(loc='upper right', fontsize=12, framealpha=0.95)   # 图例
+    
+    # Remove axis ticks for cleaner paper figure
+    plt.xticks([])
+    plt.yticks([])
     
     # Create save directory if it doesn't exist
     Path(save_dir).mkdir(parents=True, exist_ok=True)
     
     # Save figure
-    save_path = Path(save_dir) / f"vis_pred_{scenario_id}.png"
-    plt.savefig(save_path, dpi=200, bbox_inches='tight')
+    filename_prefix = "vis_paper_truth" if only_truth else "vis_paper"
+    save_path = Path(save_dir) / f"{filename_prefix}_{scenario_id}.png"
+    plt.savefig(save_path, dpi=300, bbox_inches='tight', pad_inches=0.1)
     print(f"\nVisualization saved to: {save_path}")
     plt.close()
     print("Done!")
-
-
-
 
 
 def main():
     """Main function with command-line argument support."""
     
     # Parse command-line arguments
-    parser = argparse.ArgumentParser(description='Visualize DeMo trajectory predictions')
+    parser = argparse.ArgumentParser(description='Visualize DeMo trajectory predictions for paper (fixed size)')
     parser.add_argument(
         '--checkpoint',
         type=str,
-        default='outputs/lowrank_r32_simplify_seed/seed_42/20251013-223147/checkpoints/epoch=59.ckpt',
+        # default='outputs/lowrank_r32_simplify_seed/seed_44/20251020-233228/checkpoints/epoch=59.ckpt',
+        default='outputs/original_demo_seed/seed44/20250930-071300/checkpoints/epoch=59.ckpt',
         help='Path to the model checkpoint file'
     )
     parser.add_argument(
@@ -406,6 +492,23 @@ def main():
         default='./viz_traj',
         help='Directory to save visualization images'
     )
+    parser.add_argument(
+        '--width',
+        type=float,
+        default=110.0,
+        help='Fixed width of the view in meters (default: 140m)'
+    )
+    parser.add_argument(
+        '--height',
+        type=float,
+        default=70.0,
+        help='Fixed height of the view in meters (default: 80m)'
+    )
+    parser.add_argument(
+        '--only_truth',
+        action='store_true',
+        help='Only draw history and ground truth, without predicted trajectories'
+    )
     
     args = parser.parse_args()
     
@@ -416,7 +519,7 @@ def main():
         parser.error("--idx and --scene_id are mutually exclusive, provide only one")
     
     print("="*70)
-    print("DeMo Trajectory Prediction Visualization")
+    print("DeMo Trajectory Prediction Visualization (Paper Version)")
     print("="*70)
     print(f"Checkpoint: {args.checkpoint}")
     if args.idx is not None:
@@ -425,27 +528,45 @@ def main():
         print(f"Scene ID: {args.scene_id}")
     print(f"Data Root: {args.data_root}")
     print(f"Save Directory: {args.save_dir}")
+    print(f"Fixed View Size: {args.width}m x {args.height}m")
+    print(f"Only Truth: {args.only_truth}")
     print("="*70)
     
-    # Step 1: Load model and data
-    print("\n[1/4] Loading model and validation data...")
-    model, scene_data, scenario_id, raw_data = load_model_and_data(
-        args.checkpoint, 
-        scene_idx=args.idx, 
-        scene_id=args.scene_id
-    )
+    if args.only_truth:
+        print("\n[1/2] Loading validation scene only...")
+        scene_data, scenario_id, raw_data = load_validation_scene(
+            scene_idx=args.idx,
+            scene_id=args.scene_id,
+            data_root=args.data_root,
+            load_scene=False
+        )
+        predictions_global = None
+        probabilities = None
+
+        print("\n[2/2] Generating truth-only visualization with fixed size...")
+    else:
+        # Step 1: Load model and data
+        print("\n[1/4] Loading model and validation data...")
+        model, scene_data, scenario_id, raw_data = load_model_and_data(
+            args.checkpoint,
+            scene_idx=args.idx,
+            scene_id=args.scene_id,
+            data_root=args.data_root
+        )
+        
+        # Step 2: Run prediction
+        print("\n[2/4] Running model prediction...")
+        predictions_local, probabilities = predict_trajectories(model, scene_data)
+        
+        # Step 3: Transform to global coordinates
+        print("\n[3/4] Transforming to global coordinates...")
+        predictions_global = transform_to_global(predictions_local, raw_data)
+        
+        # Step 4: Visualize with fixed size
+        print("\n[4/4] Generating paper-ready visualization with fixed size...")
     
-    # Step 2: Run prediction
-    print("\n[2/4] Running model prediction...")
-    predictions_local, probabilities = predict_trajectories(model, scene_data)
-    
-    # Step 3: Transform to global coordinates
-    print("\n[3/4] Transforming to global coordinates...")
-    predictions_global = transform_to_global(predictions_local, raw_data)
-    
-    # Step 4: Visualize with av2
-    print("\n[4/4] Generating visualization with av2...")
-    visualize_with_av2(scenario_id, predictions_global, probabilities, args.save_dir)
+    visualize_with_fixed_size(scenario_id, predictions_global, probabilities, raw_data,
+                             args.save_dir, args.width, args.height, args.only_truth)
     
     print("\n" + "="*70)
     print("Done!")

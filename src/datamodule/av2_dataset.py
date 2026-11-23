@@ -27,7 +27,10 @@ class Av2Dataset(Dataset):
         self.num_historical_steps = num_historical_steps
         self.num_future_steps = 0 if split =='test' else 60
         self.sequence_origins = sequence_origins
-        self.mode = 'only_focal' if split != 'train' else train_mode
+        # self.mode = 'only_focal' if split != 'train' else train_mode      # only_focal for val/test
+        
+        # Allow validation/test to respect configured train_mode for multi-agent evaluation
+        self.mode = train_mode
         self.radius = radius
 
         print(
@@ -53,7 +56,8 @@ class Av2Dataset(Dataset):
         for cur_step in self.sequence_origins:
             for ag_idx in train_idx:
                 ag_dict = self.process_single_agent(data, ag_idx, cur_step)
-            sequence_data.append(ag_dict)
+            sequence_data.append(ag_dict)   
+
         
         return sequence_data
 

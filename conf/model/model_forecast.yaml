@@ -15,6 +15,11 @@ target:
     drop_path: 0.2
     use_low_rank: True  # 启用低秩分解
     low_rank_dim: 32    # 低秩维度,默认32
+    offset_mode: null   # null preserves the legacy use_low_rank setting
+    refine_mhca: true
+    refine_mhsa: true
+    refine_mamba: true
+    refine_mamba_bidirectional: true
   pretrained_weights: ${pretrained_weights}
   lr: ${lr}
   weight_decay: ${weight_decay}

@@ -31,7 +31,7 @@ class LinearAgentEncoder(nn.Module):
         self.hist_steps = hist_steps
         self.feat_dim = feat_dim
         self.input_dim = hist_steps * feat_dim
-        
+
         # 单层线性变换，无bias以保持LTSF-Linear的纯粹性
         self.encoder = nn.Linear(self.input_dim, embed_dim, bias=False)
 
@@ -65,6 +65,11 @@ class ModelForecast(nn.Module):
         agent_encoder_type: str = 'mamba',  # <-- 新增：编码器切换开关
         use_low_rank: bool = True,  # 添加低秩开关
         low_rank_dim: int = 16,     # 添加低秩维度
+        offset_mode: str = None,
+        refine_mhca: bool = True,
+        refine_mhsa: bool = True,
+        refine_mamba: bool = True,
+        refine_mamba_bidirectional: bool = True,
     ) -> None:
         super().__init__()
 
@@ -145,7 +150,12 @@ class ModelForecast(nn.Module):
             future_len=future_steps,
             dim=embed_dim,
             use_low_rank=use_low_rank,
-            rank=low_rank_dim
+            rank=low_rank_dim,
+            offset_mode=offset_mode,
+            refine_mhca=refine_mhca,
+            refine_mhsa=refine_mhsa,
+            refine_mamba=refine_mamba,
+            refine_mamba_bidirectional=refine_mamba_bidirectional,
         )
 
         self.initialize_weights()
@@ -421,4 +431,4 @@ class StreamModelForecast(ModelForecast):
                 nn.GELU(),
                 nn.Linear(kwargs["embed_dim"], kwargs["embed_dim"]),
             )
-        
+

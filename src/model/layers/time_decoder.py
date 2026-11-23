@@ -1,3 +1,5 @@
+# 简化了的 TimeDecoder 模块，移除了一些冗余的自注意力层，并优化了模式间交互
+
 import torch
 import torch.nn as nn
 from .transformer_blocks import Cross_Block, Block
@@ -12,7 +14,7 @@ except ImportError:
 
 class LowRankAdapter(nn.Module):
     """低秩分解适配器，为每个模式生成轻量的状态查询增量"""
-    def __init__(self, dim=128, rank=16, num_modes=6):
+    def __init__(self, dim=128, rank=16, num_modes=6, future_len=60):
         super().__init__()
         self.dim = dim
         self.rank = rank
@@ -21,7 +23,7 @@ class LowRankAdapter(nn.Module):
         # 低秩分解: ΔS_k = A_k * B^T
         # A_k: [num_modes, T_s, rank] - 每个模式独有
         # B: [dim, rank] - 所有模式共享
-        self.mode_specific_A = nn.Parameter(torch.randn(num_modes, 60, rank) * 0.01)
+        self.mode_specific_A = nn.Parameter(torch.randn(num_modes, future_len, rank) * 0.01)
         self.shared_B = nn.Parameter(torch.randn(dim, rank) * 0.01)
         
         # 可选：为增量添加缩放因子
@@ -55,6 +57,21 @@ class LowRankAdapter(nn.Module):
             all_deltas_expand = all_deltas.unsqueeze(0).expand(B, -1, -1, -1)  # [B, K, T_s, C]
             
             return global_states_expand + self.scale * all_deltas_expand
+
+
+class FullRankAdapter(nn.Module):
+    """Learn an unconstrained intention-specific offset for each future step."""
+
+    def __init__(self, dim=128, rank=16, num_modes=6, future_len=60):
+        super().__init__()
+        # Match the initial offset scale of the factorized adapter.
+        a = torch.randn(num_modes, future_len, rank) * 0.01
+        b = torch.randn(dim, rank) * 0.01
+        self.mode_specific_delta = nn.Parameter(a @ b.T)
+        self.scale = nn.Parameter(torch.ones(1) * 0.1)
+
+    def forward(self, global_states):
+        return global_states.unsqueeze(1) + self.scale * self.mode_specific_delta.unsqueeze(0)
 
 class GMMPredictor_dense(nn.Module):
     def __init__(self, future_len=60, dim=128):
@@ -116,16 +133,24 @@ class GMMPredictor(nn.Module):
     
 
 class TimeDecoder(nn.Module):
-    def __init__(self, future_len=60, dim=128, use_low_rank=True, rank=16):
+    def __init__(self, future_len=60, dim=128, use_low_rank=True, rank=16,
+                 offset_mode=None, refine_mhca=True, refine_mhsa=True,
+                 refine_mamba=True, refine_mamba_bidirectional=True):
         super(TimeDecoder, self).__init__()
         
-        self.use_low_rank = use_low_rank
+        self.offset_mode = offset_mode or ('lowrank' if use_low_rank else 'global')
+        if self.offset_mode not in ('global', 'fullrank', 'lowrank'):
+            raise ValueError(f'Unknown offset_mode: {self.offset_mode}')
+        self.use_low_rank = self.offset_mode == 'lowrank'
+        self.refine_mhca = refine_mhca
+        self.refine_mhsa = refine_mhsa
+        self.refine_mamba = refine_mamba
         self.num_modes = 6  # 模式数量
 
         ###### State Consistency Module ######
         # state cross attention
         self.cross_block_time = nn.ModuleList(
-            Cross_Block()
+            Cross_Block(dim=dim)
             for i in range(2)
         )
 
@@ -159,18 +184,22 @@ class TimeDecoder(nn.Module):
 
         ###### 低秩分解模块 ######
         if self.use_low_rank:
-            self.low_rank_adapter = LowRankAdapter(dim=dim, rank=rank, num_modes=self.num_modes)
+            self.low_rank_adapter = LowRankAdapter(dim=dim, rank=rank, num_modes=self.num_modes,
+                                                    future_len=future_len)
+        elif self.offset_mode == 'fullrank':
+            self.full_rank_adapter = FullRankAdapter(dim=dim, rank=rank, num_modes=self.num_modes,
+                                                      future_len=future_len)
 
         ###### Mode Localization Module ######
         # mode self attention
         self.self_block_mode = nn.ModuleList(
-            Block()
+            Block(dim=dim)
             for i in range(3)
         )
 
         # mode cross attention
         self.cross_block_mode = nn.ModuleList(
-            Cross_Block()
+            Cross_Block(dim=dim)
             for i in range(3)
         )
 
@@ -179,7 +208,7 @@ class TimeDecoder(nn.Module):
         self.register_buffer('modal', torch.arange(6).long())
 
         # MLP for mode query
-        self.predictor = GMMPredictor(future_len)
+        self.predictor = GMMPredictor(future_len, dim=dim)
 
         ###### Hybrid Coupling Module ######
         # --- START: MODIFICATION ---
@@ -190,36 +219,26 @@ class TimeDecoder(nn.Module):
         # )
 
         # hybrid cross attention (保留)
-        self.cross_block_dense = nn.ModuleList(
-            Cross_Block()
-            for i in range(3)
-        )
+        if self.refine_mhca:
+            self.cross_block_dense = nn.ModuleList(Cross_Block(dim=dim) for i in range(3))
 
         # mode self attention for hybrid spatiotemporal queries (简化为1层)
-        self.self_block_different_mode = nn.ModuleList(
-            Block()
-            for i in range(1) # 从3层减少到1层
-        )
+        if self.refine_mhsa:
+            self.self_block_different_mode = nn.ModuleList(Block(dim=dim) for i in range(1))
 
         # state bidirectional mamba for hybrid spatiotemporal queries (保留)
-        self.dense_embed_mamba = nn.ModuleList(  
-            [
-                create_block(  
-                    d_model=dim,
-                    layer_idx=i,
-                    drop_path=0.2,  
-                    bimamba=True,  
-                    rms_norm=True,  
-                )
+        if self.refine_mamba:
+            self.dense_embed_mamba = nn.ModuleList(
+                create_block(d_model=dim, layer_idx=i, drop_path=0.2,
+                             bimamba=refine_mamba_bidirectional, rms_norm=True)
                 for i in range(2)
-            ]
-        )
-        self.dense_norm_f = RMSNorm(dim, eps=1e-5)
-        self.dense_drop_path = DropPath(0.2)
+            )
+            self.dense_norm_f = RMSNorm(dim, eps=1e-5)
+            self.dense_drop_path = DropPath(0.2)
         # --- END: MODIFICATION ---
 
         # MLP for final output
-        self.predictor_dense = GMMPredictor_dense(future_len)
+        self.predictor_dense = GMMPredictor_dense(future_len, dim=dim)
 
     def forward(self, mode, encoding, mask=None):
         # Dynamic state consistency - 学习全局状态查询
@@ -247,9 +266,11 @@ class TimeDecoder(nn.Module):
         global_state_query = mode  # [B, T_s, C]
         
         # 使用低秩分解为每个模式生成特定的状态查询
-        if self.use_low_rank:
+        if self.offset_mode == 'lowrank':
             # 生成所有模式的状态查询: S_k = S + ΔS_k
             mode_specific_states = self.low_rank_adapter(global_state_query)  # [B, K, T_s, C]
+        elif self.offset_mode == 'fullrank':
+            mode_specific_states = self.full_rank_adapter(global_state_query)
         else:
             # 原始方案：所有模式共享同一状态查询
             mode_specific_states = global_state_query.unsqueeze(1).expand(-1, self.num_modes, -1, -1)
@@ -275,38 +296,40 @@ class TimeDecoder(nn.Module):
         
         # --- START: MODIFICATION ---
         # 重塑并与场景上下文进行最终交互 (保留)
-        mode_dense = mode_dense.reshape(B, -1, C)
-        for blk in self.cross_block_dense:
-            mode_dense = blk(mode_dense, encoding, key_padding_mask=mask)
+        if self.refine_mhca:
+            mode_dense = mode_dense.reshape(B, -1, C)
+            for blk in self.cross_block_dense:
+                mode_dense = blk(mode_dense, encoding, key_padding_mask=mask)
+            mode_dense = mode_dense.reshape(B, K, T, C)
         
         # 移除全局自注意力 (self_block_dense)
         # for blk in self.self_block_dense:
         #     mode_dense = blk(mode_dense)
 
-        mode_dense = mode_dense.reshape(B, K, T, C)
-        
         # 简化为极薄的 Mode-only 自注意力 (保留并简化)
-        mode_dense = mode_dense.transpose(1, 2).reshape(-1, K, C)
-        for blk in self.self_block_different_mode:
-            mode_dense = blk(mode_dense)
-        mode_dense = mode_dense.reshape(B, -1, K, C).transpose(1, 2)
+        if self.refine_mhsa:
+            mode_dense = mode_dense.transpose(1, 2).reshape(-1, K, C)
+            for blk in self.self_block_different_mode:
+                mode_dense = blk(mode_dense)
+            mode_dense = mode_dense.reshape(B, -1, K, C).transpose(1, 2)
 
         # 时序连贯性检查 (保留)
-        mode_dense = mode_dense.reshape(-1, T, C)
-        residual = None
-        for blk_mamba in self.dense_embed_mamba:
-            mode_dense, residual = blk_mamba(mode_dense, residual)
-        fused_add_norm_fn = rms_norm_fn if isinstance(self.dense_norm_f, RMSNorm) else layer_norm_fn
-        mode_dense = fused_add_norm_fn(
-            self.dense_drop_path(mode_dense),
-            self.dense_norm_f.weight,
-            self.dense_norm_f.bias,
-            eps=self.dense_norm_f.eps,
-            residual=residual,
-            prenorm=False,
-            residual_in_fp32=True  
-        )
-        mode_dense = mode_dense.reshape(B, K, T, C)
+        if self.refine_mamba:
+            mode_dense = mode_dense.reshape(-1, T, C)
+            residual = None
+            for blk_mamba in self.dense_embed_mamba:
+                mode_dense, residual = blk_mamba(mode_dense, residual)
+            fused_add_norm_fn = rms_norm_fn if isinstance(self.dense_norm_f, RMSNorm) else layer_norm_fn
+            mode_dense = fused_add_norm_fn(
+                self.dense_drop_path(mode_dense),
+                self.dense_norm_f.weight,
+                self.dense_norm_f.bias,
+                eps=self.dense_norm_f.eps,
+                residual=residual,
+                prenorm=False,
+                residual_in_fp32=True
+            )
+            mode_dense = mode_dense.reshape(B, K, T, C)
         # --- END: MODIFICATION ---
 
         y_hat_new, pi_new, scal_new = self.predictor_dense(mode_dense)

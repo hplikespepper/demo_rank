@@ -1,0 +1,4 @@
+defaults:
+  - config
+  - override hydra/job_logging: stdout
+  - _self_

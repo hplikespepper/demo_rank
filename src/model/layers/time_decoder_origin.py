@@ -1,3 +1,4 @@
+# 原始版本，仅在demo的基础上添加了可使用低秩分解适配器模块的选项，但这个版本只用于进行原始DeMo模型的对比实验，实际上不用低秩分解
 import torch
 import torch.nn as nn
 from .transformer_blocks import Cross_Block, Block
